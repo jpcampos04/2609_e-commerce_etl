@@ -18,7 +18,7 @@ jobs:
         ORIGIN_HOST=${{ secrets.DATABRICKS_ORIGIN_HOST }}
         ORIGIN_TOKEN=${{ secrets.DATABRICKS_ORIGIN_TOKEN }}
         NOTEBOOK_BASE="/Workspace/Users/jpablocampos04@gmail.com/2609_e-commerce_etl"
-        NOTEBOOKS=("1.- Preparacion_Ambiente" 
+        NOTEBOOKS=("1.- Environment_Preparation" 
                   "2.- Ingest customers" 
                   "2.- Ingest geolocation"
                   "2.- Ingest items"
