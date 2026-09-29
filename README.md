@@ -139,7 +139,7 @@ Workflow: WF-ETL
 └── Load                                       (Gold: sales, delivery, geo concentration)
 ```
  
-![Texto descriptivo](evidencias/Workflow.jpg)
+![Texto descriptivo](evidence/Workflow.jpg)
 
 ⏰ **Schedule**: configurable via cron (currently monthly, adjustable to daily)
 🌎 **Timezone**: America/Mexico_City
