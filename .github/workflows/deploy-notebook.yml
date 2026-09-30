@@ -29,7 +29,7 @@ jobs:
                   "2.- Ingest translation"
                   "3.- Transform"
                   "4.- Load"
-                  "")  # Agrega más según necesites
+                  )  # Agrega más según necesites
         mkdir -p notebooks_to_deploy
         for nb in "${NOTEBOOKS[@]}"; do
           echo "Exportando $nb en modo raw..."
