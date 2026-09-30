@@ -1,0 +1,37 @@
+name: Deploy Databricks Bundle
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "databricks.yml"
+      - "resources/**"
+      - "2609_e-commerce_etl/**"
+  workflow_dispatch:  
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Deploy bundle
+        run: databricks bundle deploy https://adb-7405614601018594.14.azuredatabricks.net/
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+
+      # Descomenta esto si quieres que cada deploy dispare una corrida
+      # inmediata del pipeline para validar que todo quedó bien.
+      # Ojo: tu job ya tiene un schedule propio (mensual); esto sería
+      # una corrida EXTRA de validación en cada push, no reemplaza el cron.
+      # - name: Run WF_ETL (validation run)
+      #   run: databricks bundle run WF_ETL -t dev
+      #   env:
+      #     DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      #     DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
