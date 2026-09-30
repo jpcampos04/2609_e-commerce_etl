@@ -26,12 +26,3 @@ jobs:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
 
-      # Descomenta esto si quieres que cada deploy dispare una corrida
-      # inmediata del pipeline para validar que todo quedó bien.
-      # Ojo: tu job ya tiene un schedule propio (mensual); esto sería
-      # una corrida EXTRA de validación en cada push, no reemplaza el cron.
-      # - name: Run WF_ETL (validation run)
-      #   run: databricks bundle run WF_ETL -t dev
-      #   env:
-      #     DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-      #     DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
