@@ -1,4 +1,4 @@
-name: Deploy Databricks ETL (PROD -> DEV)
+name: Deploy Databricks ETL (DEV -> PROD)
 
 on:
   push:
@@ -15,17 +15,22 @@ env:
   # Rutas de los notebooks
   NOTEBOOK_SRC_BASE: "/Workspace/Users/jpablocampos04@gmail.com/2609_e-commerce_etl/proceso"
   NOTEBOOK_DEST_BASE: "/Workspace/Users/jpablocampos04@gmail.com/2609_e-commerce_etl/proceso"
-  # Nombre del job en DEV
+  # Nombre del job en PROD
   WORKFLOW_NAME: "WF-ETL"
-  # Parametros de los notebooks (ajustalos si en DEV cambian)
+  # Parametros de los notebooks en el workspace DESTINO (PROD).
+  # VERIFICA estos valores: en DEV eran catalog_au / adlsjpccd01.
   CATALOGO: "catalog_au"
-  STORAGE_NAME: "adlsjpccd01"
+  STORAGE_NAME: "adlsjpccp01"
   CONTAINER: "raw"
+  # Estado del schedule del job en PROD (PAUSED para crearlo sin que corra solo)
+  SCHEDULE_STATUS: "UNPAUSED"
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     env:
+      # ORIGIN = DEV  (adbrjpccd01), donde estan los notebooks
+      # DEST   = PROD (adbrjpccp01), donde se despliegan y se crea el job
       ORIGIN_HOST: ${{ secrets.DATABRICKS_ORIGIN_HOST }}
       ORIGIN_TOKEN: ${{ secrets.DATABRICKS_ORIGIN_TOKEN }}
       DEST_HOST: ${{ secrets.DATABRICKS_DEST_HOST }}
@@ -37,12 +42,12 @@ jobs:
       - name: Install jq & curl
         run: sudo apt-get update && sudo apt-get install -y jq curl
 
-      - name: Export notebooks from PROD (raw)
+      - name: Export notebooks from DEV (raw)
         run: |
           set -euo pipefail
           ORIGIN_HOST="${ORIGIN_HOST%/}"
 
-          # Notebooks nombres
+          # Los nombres llevan espacios y puntos, por eso van entre comillas
           NOTEBOOKS=(
             "2.- Ingest customers"
             "2.- Ingest geolocation"
@@ -56,19 +61,34 @@ jobs:
             "4.- Load"
           )
 
+          # Diagnostico: muestra que hay realmente en la carpeta origen
+          echo "Contenido de $NOTEBOOK_SRC_BASE en DEV:"
+          list_response=$(curl -sS -G \
+            -H "Authorization: Bearer $ORIGIN_TOKEN" \
+            --data-urlencode "path=$NOTEBOOK_SRC_BASE" \
+            "$ORIGIN_HOST/api/2.0/workspace/list" || true)
+          echo "$list_response" | jq -r 'if .objects then (.objects[] | "  " + .object_type + "  " + .path) else . end' \
+            || echo "$list_response"
+          echo ""
+
           mkdir -p notebooks_to_deploy
           for nb in "${NOTEBOOKS[@]}"; do
             echo "Exportando '$nb' en modo raw..."
-            curl -sS --fail-with-body -G \
+            http_code=$(curl -sS -o "notebooks_to_deploy/$nb.py" -w "%{http_code}" -G \
               -H "Authorization: Bearer $ORIGIN_TOKEN" \
               --data-urlencode "path=$NOTEBOOK_SRC_BASE/$nb" \
               --data-urlencode "format=SOURCE" \
               --data-urlencode "direct_download=true" \
-              "$ORIGIN_HOST/api/2.0/workspace/export" \
-              --output "notebooks_to_deploy/$nb.py"
+              "$ORIGIN_HOST/api/2.0/workspace/export")
+            if [ "$http_code" != "200" ]; then
+              echo "Error HTTP $http_code al exportar '$nb':"
+              cat "notebooks_to_deploy/$nb.py"
+              echo
+              exit 1
+            fi
           done
 
-      - name: Deploy notebooks to DEV workspace
+      - name: Deploy notebooks to PROD workspace
         run: |
           set -euo pipefail
           DEST_HOST="${DEST_HOST%/}"
@@ -96,7 +116,7 @@ jobs:
             echo
           done
 
-      - name: Delete existing workflow in DEV (if any)
+      - name: Delete existing workflow in PROD (if any)
         run: |
           set -euo pipefail
           DEST_HOST="${DEST_HOST%/}"
@@ -139,6 +159,7 @@ jobs:
             --arg container "$CONTAINER" \
             --arg catalogo "$CATALOGO" \
             --arg storage "$STORAGE_NAME" \
+            --arg schedule_status "$SCHEDULE_STATUS" \
             '
             def ingest($key; $nb): {
               task_key: $key,
@@ -159,7 +180,7 @@ jobs:
               schedule: {
                 quartz_cron_expression: "27 4 12 28 * ?",
                 timezone_id: "America/Mexico_City",
-                pause_status: "PAUSED"
+                pause_status: $schedule_status
               },
               tasks: [
                 ingest("Customers";   "2.- Ingest customers"),
@@ -209,7 +230,7 @@ jobs:
               queue: { enabled: true },
               performance_target: "PERFORMANCE_OPTIMIZED",
               tags: {
-                environment: "dev",
+                environment: "prod",
                 created_by: "github_actions",
                 project: "e-commerce_etl",
                 compute: "serverless"
@@ -233,7 +254,7 @@ jobs:
             echo "JOB_ID=$job_id" >> "$GITHUB_ENV"
           else
             echo "Error al crear el workflow"
-            echo "Si el error menciona compute/cluster, verifica que el workspace DEV tenga serverless for workflows habilitado."
+            echo "Si el error menciona compute/cluster, verifica que el workspace PROD tenga serverless for workflows habilitado."
             exit 1
           fi
 
