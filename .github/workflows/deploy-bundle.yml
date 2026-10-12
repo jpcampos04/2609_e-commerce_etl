@@ -1,28 +1,286 @@
-name: Deploy Databricks Bundle
+name: Deploy Databricks ETL (PROD -> DEV)
 
 on:
   push:
     branches:
       - main
-    paths:
-      - "databricks.yml"
-      - "resources/**"
-      - "2609_e-commerce_etl/**"
-  workflow_dispatch:  
+  workflow_dispatch:
+
+# Evita dos despliegues al mismo tiempo
+concurrency:
+  group: databricks-deploy
+  cancel-in-progress: false
+
+env:
+  # Rutas de los notebooks
+  NOTEBOOK_SRC_BASE: "/Workspace/Users/jpablocampos04@gmail.com/2609_e-commerce_etl/proceso"
+  NOTEBOOK_DEST_BASE: "/Workspace/Users/jpablocampos04@gmail.com/2609_e-commerce_etl/proceso"
+  # Nombre del job en DEV
+  WORKFLOW_NAME: "WF-ETL"
+  # Parametros de los notebooks (ajustalos si en DEV cambian)
+  CATALOGO: "catalog_au"
+  STORAGE_NAME: "adlsjpccd01"
+  CONTAINER: "raw"
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      ORIGIN_HOST: ${{ secrets.DATABRICKS_ORIGIN_HOST }}
+      ORIGIN_TOKEN: ${{ secrets.DATABRICKS_ORIGIN_TOKEN }}
+      DEST_HOST: ${{ secrets.DATABRICKS_DEST_HOST }}
+      DEST_TOKEN: ${{ secrets.DATABRICKS_DEST_TOKEN }}
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Databricks CLI
-        uses: databricks/setup-cli@main
+      - name: Install jq & curl
+        run: sudo apt-get update && sudo apt-get install -y jq curl
 
-      - name: Deploy bundle
-        run: databricks bundle deploy https://adb-7405614601018594.14.azuredatabricks.net/
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      - name: Export notebooks from PROD (raw)
+        run: |
+          set -euo pipefail
+          ORIGIN_HOST="${ORIGIN_HOST%/}"
 
+          # Notebooks nombres
+          NOTEBOOKS=(
+            "2.- Ingest customers"
+            "2.- Ingest geolocation"
+            "2.- Ingest items"
+            "2.- Ingest orders"
+            "2.- Ingest payments"
+            "2.- Ingest products"
+            "2.- Ingest sellers"
+            "2.- Ingest translation"
+            "3.- Transform"
+            "4.- Load"
+          )
+
+          mkdir -p notebooks_to_deploy
+          for nb in "${NOTEBOOKS[@]}"; do
+            echo "Exportando '$nb' en modo raw..."
+            curl -sS --fail-with-body -G \
+              -H "Authorization: Bearer $ORIGIN_TOKEN" \
+              --data-urlencode "path=$NOTEBOOK_SRC_BASE/$nb" \
+              --data-urlencode "format=SOURCE" \
+              --data-urlencode "direct_download=true" \
+              "$ORIGIN_HOST/api/2.0/workspace/export" \
+              --output "notebooks_to_deploy/$nb.py"
+          done
+
+      - name: Deploy notebooks to DEV workspace
+        run: |
+          set -euo pipefail
+          DEST_HOST="${DEST_HOST%/}"
+
+          echo "Creando carpeta $NOTEBOOK_DEST_BASE si no existe..."
+          curl -sS --fail-with-body -X POST \
+            -H "Authorization: Bearer $DEST_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg p "$NOTEBOOK_DEST_BASE" '{path: $p}')" \
+            "$DEST_HOST/api/2.0/workspace/mkdirs"
+          echo
+
+          for file in notebooks_to_deploy/*.py; do
+            name=$(basename "$file" .py)
+            dest_path="$NOTEBOOK_DEST_BASE/$name"
+            echo "Importando '$file' -> '$dest_path'"
+            curl -sS --fail-with-body -X POST \
+              -H "Authorization: Bearer $DEST_TOKEN" \
+              -F "path=$dest_path" \
+              -F "format=SOURCE" \
+              -F "language=PYTHON" \
+              -F "overwrite=true" \
+              -F "content=@$file" \
+              "$DEST_HOST/api/2.0/workspace/import"
+            echo
+          done
+
+      - name: Delete existing workflow in DEV (if any)
+        run: |
+          set -euo pipefail
+          DEST_HOST="${DEST_HOST%/}"
+
+          echo "Verificando si existe el workflow: $WORKFLOW_NAME"
+          workflows_response=$(curl -sS --fail-with-body -G \
+            -H "Authorization: Bearer $DEST_TOKEN" \
+            --data-urlencode "name=$WORKFLOW_NAME" \
+            --data-urlencode "limit=100" \
+            "$DEST_HOST/api/2.1/jobs/list")
+
+          existing_job_ids=$(echo "$workflows_response" | jq -r --arg name "$WORKFLOW_NAME" \
+            '.jobs[]? | select(.settings.name == $name) | .job_id')
+
+          if [ -n "$existing_job_ids" ]; then
+            for existing_job_id in $existing_job_ids; do
+              echo "Workflow encontrado con ID: $existing_job_id. Eliminando..."
+              curl -sS --fail-with-body -X POST \
+                -H "Authorization: Bearer $DEST_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"job_id\": $existing_job_id}" \
+                "$DEST_HOST/api/2.1/jobs/delete"
+              echo
+            done
+          else
+            echo "No se encontro workflow existente con nombre: $WORKFLOW_NAME"
+          fi
+
+      - name: Create Databricks Workflow WF-ETL (Serverless)
+        run: |
+          set -euo pipefail
+          DEST_HOST="${DEST_HOST%/}"
+
+          echo "Creando workflow: $WORKFLOW_NAME con serverless compute"
+
+          # Sin existing_cluster_id / new_cluster / job_cluster_key => serverless
+          jq -n \
+            --arg name "$WORKFLOW_NAME" \
+            --arg base "$NOTEBOOK_DEST_BASE" \
+            --arg container "$CONTAINER" \
+            --arg catalogo "$CATALOGO" \
+            --arg storage "$STORAGE_NAME" \
+            '
+            def ingest($key; $nb): {
+              task_key: $key,
+              notebook_task: {
+                notebook_path: ($base + "/" + $nb),
+                base_parameters: {
+                  container: $container,
+                  catalogo: $catalogo,
+                  esquema: "bronze",
+                  storageName: $storage
+                },
+                source: "WORKSPACE"
+              }
+            };
+            {
+              name: $name,
+              format: "MULTI_TASK",
+              schedule: {
+                quartz_cron_expression: "27 4 12 28 * ?",
+                timezone_id: "America/Mexico_City",
+                pause_status: "PAUSED"
+              },
+              tasks: [
+                ingest("Customers";   "2.- Ingest customers"),
+                ingest("Geolocation"; "2.- Ingest geolocation"),
+                ingest("Items";       "2.- Ingest items"),
+                ingest("Orders";      "2.- Ingest orders"),
+                ingest("Payments";    "2.- Ingest payments"),
+                ingest("Products";    "2.- Ingest products"),
+                ingest("Sellers";     "2.- Ingest sellers"),
+                ingest("Translation"; "2.- Ingest translation"),
+                {
+                  task_key: "Transform",
+                  depends_on: [
+                    {task_key: "Payments"},
+                    {task_key: "Sellers"},
+                    {task_key: "Items"},
+                    {task_key: "Customers"},
+                    {task_key: "Orders"},
+                    {task_key: "Products"},
+                    {task_key: "Geolocation"},
+                    {task_key: "Translation"}
+                  ],
+                  notebook_task: {
+                    notebook_path: ($base + "/3.- Transform"),
+                    base_parameters: {
+                      catalogo: $catalogo,
+                      esquema_source: "bronze",
+                      esquema_sink: "silver"
+                    },
+                    source: "WORKSPACE"
+                  }
+                },
+                {
+                  task_key: "Load",
+                  depends_on: [ {task_key: "Transform"} ],
+                  notebook_task: {
+                    notebook_path: ($base + "/4.- Load"),
+                    base_parameters: {
+                      catalogo: $catalogo,
+                      esquema_source: "silver",
+                      esquema_sink: "gold"
+                    },
+                    source: "WORKSPACE"
+                  }
+                }
+              ],
+              queue: { enabled: true },
+              performance_target: "PERFORMANCE_OPTIMIZED",
+              tags: {
+                environment: "dev",
+                created_by: "github_actions",
+                project: "e-commerce_etl",
+                compute: "serverless"
+              }
+            }' > workflow_config.json
+
+          jq empty workflow_config.json || { echo "JSON invalido"; cat workflow_config.json; exit 1; }
+
+          create_response=$(curl -sS --fail-with-body -X POST \
+            -H "Authorization: Bearer $DEST_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d @workflow_config.json \
+            "$DEST_HOST/api/2.1/jobs/create")
+
+          echo "Workflow creation response: $create_response"
+
+          job_id=$(echo "$create_response" | jq -r '.job_id // empty')
+
+          if [ -n "$job_id" ]; then
+            echo "Workflow '$WORKFLOW_NAME' creado exitosamente con ID: $job_id"
+            echo "JOB_ID=$job_id" >> "$GITHUB_ENV"
+          else
+            echo "Error al crear el workflow"
+            echo "Si el error menciona compute/cluster, verifica que el workspace DEV tenga serverless for workflows habilitado."
+            exit 1
+          fi
+
+      - name: Validate Workflow Configuration
+        run: |
+          set -euo pipefail
+          DEST_HOST="${DEST_HOST%/}"
+
+          echo "Validando el workflow creado (ID: $JOB_ID)..."
+          job_details=$(curl -sS --fail-with-body -G \
+            -H "Authorization: Bearer $DEST_TOKEN" \
+            --data-urlencode "job_id=$JOB_ID" \
+            "$DEST_HOST/api/2.1/jobs/get")
+
+          echo "Nombre: $(echo "$job_details" | jq -r '.settings.name')"
+          echo "Numero de tareas: $(echo "$job_details" | jq '.settings.tasks | length')"
+          echo ""
+          echo "Tareas y dependencias:"
+          echo "$job_details" | jq -r '.settings.tasks[] | "- " + .task_key + " -> " + .notebook_task.notebook_path + " (depende de: " + ([.depends_on[]?.task_key] | join(", ")) + ")"'
+          echo ""
+          echo "Performance target: $(echo "$job_details" | jq -r '.settings.performance_target // "STANDARD"')"
+
+          # Deben ser 10 tareas: 8 ingestas + Transform + Load
+          task_count=$(echo "$job_details" | jq '.settings.tasks | length')
+          if [ "$task_count" != "10" ]; then
+            echo "Se esperaban 10 tareas y hay $task_count"
+            exit 1
+          fi
+
+          # Fallar si alguna tarea quedo con cluster clasico
+          classic=$(echo "$job_details" | jq '[.settings.tasks[] | select(.existing_cluster_id or .new_cluster or .job_cluster_key)] | length')
+          if [ "$classic" != "0" ]; then
+            echo "Hay $classic tarea(s) que no usan serverless"
+            exit 1
+          fi
+
+      - name: Clean up
+        if: always()
+        run: |
+          rm -rf notebooks_to_deploy
+          rm -f workflow_config.json
+
+      - name: Done
+        run: |
+          echo "Despliegue completado exitosamente"
+          echo ""
+          echo "Notebooks desplegados en: $NOTEBOOK_DEST_BASE"
+          echo "Workflow creado: $WORKFLOW_NAME (ID: $JOB_ID)"
+          echo "Flujo: 8 ingestas (bronze) -> Transform (silver) -> Load (gold)"
+          echo "Computo: serverless (performance_target: PERFORMANCE_OPTIMIZED)"
