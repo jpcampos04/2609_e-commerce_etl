@@ -13,8 +13,8 @@ concurrency:
 
 env:
   # Rutas de los notebooks
-  NOTEBOOK_SRC_BASE: "/Workspace/Users/jpablocampos04@gmail.com/2609_e-commerce_etl/proceso"
-  NOTEBOOK_DEST_BASE: "/Workspace/Users/jpablocampos04@gmail.com/2609_e-commerce_etl/proceso"
+  NOTEBOOK_SRC_BASE: "/Workspace/Users/jpablocampos04@gmail.com/2609_e-commerce_etl/process"
+  NOTEBOOK_DEST_BASE: "/Workspace/Users/jpablocampos04@gmail.com/2609_e-commerce_etl/process"
   # Nombre del job en PROD
   WORKFLOW_NAME: "WF-ETL"
   # Parametros de los notebooks en el workspace DESTINO (PROD).
@@ -61,15 +61,20 @@ jobs:
             "4.- Load"
           )
 
-          # Diagnostico: muestra que hay realmente en la carpeta origen
-          echo "Contenido de $NOTEBOOK_SRC_BASE en DEV:"
-          list_response=$(curl -sS -G \
-            -H "Authorization: Bearer $ORIGIN_TOKEN" \
-            --data-urlencode "path=$NOTEBOOK_SRC_BASE" \
-            "$ORIGIN_HOST/api/2.0/workspace/list" || true)
-          echo "$list_response" | jq -r 'if .objects then (.objects[] | "  " + .object_type + "  " + .path) else . end' \
-            || echo "$list_response"
-          echo ""
+          # Diagnostico: recorre home -> carpeta del proyecto -> process
+          # para ver en que nivel se rompe la ruta
+          PROJECT_DIR="$(dirname "$NOTEBOOK_SRC_BASE")"
+          HOME_DIR="$(dirname "$PROJECT_DIR")"
+          for p in "$HOME_DIR" "$PROJECT_DIR" "$NOTEBOOK_SRC_BASE"; do
+            echo "Contenido de $p en DEV:"
+            list_response=$(curl -sS -G \
+              -H "Authorization: Bearer $ORIGIN_TOKEN" \
+              --data-urlencode "path=$p" \
+              "$ORIGIN_HOST/api/2.0/workspace/list" || true)
+            echo "$list_response" | jq -r 'if .objects then (.objects[] | "  " + .object_type + "  " + .path) elif .objects == null and (.error_code | not) then "  (vacia)" else (.message // .) end' \
+              || echo "$list_response"
+            echo ""
+          done
 
           mkdir -p notebooks_to_deploy
           for nb in "${NOTEBOOKS[@]}"; do
